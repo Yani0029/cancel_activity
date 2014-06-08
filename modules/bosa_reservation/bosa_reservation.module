@@ -1,0 +1,481 @@
+<?php
+/**
+ * @file
+ *
+ * @copyright Bellcom Open Source aps.
+ */
+
+/**
+ * Implementats hook_menu().
+ */
+function bosa_reservation_menu() {
+  $items['admin/bosa/reservations'] = array(
+    'title' => t('Reservation refunds'),
+    'description' => 'Info about refunds',
+    'access arguments' => array('access content'),
+    'page callback' => 'bosa_reservation_refund_page',
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  return $items;
+}
+
+/**
+ * bosa_reservation_refund_page()
+ *
+ * Page callback for reservation refund info
+ */
+function bosa_reservation_refund_page(){
+  $page = '';
+
+  $time = date('Y-m-d H:i:s');
+
+  // fetch products between the activity date/time and last reservation date/time
+  $query = new EntityFieldQuery();
+  $result = $query->entityCondition('entity_type', 'commerce_product')
+      ->propertyCondition('type', 'offer')
+      ->fieldCondition('field_dato_og_tidspunkt_for_sids', 'value', $time, '<')
+      ->execute();
+
+  $product_ids = array_keys(array_shift($result));
+
+  foreach ($product_ids as $product_id) {
+
+      $info = bosa_reservation_get_info($product_id);
+      if(empty($info)){
+        continue;
+      }
+
+      $product = commerce_product_load($product_id);
+
+      $page .= '<h3>' . $product->title . ' : ' . l($product_id, 'admin/commerce/products/'.$product_id) . '</h3>';
+
+      $header = array(
+        t('Order id'),
+        t('refund amount'),
+        t('refund status'),
+        t('Quantity'),
+        t('2nd price'),
+        t('Referenced products'),
+        t('timestamp')
+      );
+
+      $rows = array();
+
+      foreach($info as $product_info) {
+        $other_price = '';
+        $referenced_products = '';
+        $transaction_status = '';
+        $quantity = '';
+        $data = unserialize($product_info->data);
+
+        // Collect info for buidling row
+        // Set info about amount of product bought for 2nd price
+        if(isset($data['2nd_price'])){
+          $other_price .= $data['2nd_price'] . '<br/>';
+        }
+
+    if(isset($data['ref'])){
+          // Set info about referenced products for refund
+          foreach ( $data['ref'] as $referenced ) {
+            if(is_array($referenced)) {
+              $referenced_product = commerce_product_load($referenced['id']);
+              $referenced_products .= $referenced_product->title . ' : ' .  $referenced['quantity'] . '<br />';
+            }
+            else $referenced_products .= $referenced;
+          }
+        }
+
+        $quantity = $data['quantity'];
+
+        // Set info about refund status
+    $transaction_status = t('Not refunded');
+        if($data['refund_status'] == 'success'){
+          $transaction_status = t('Amount refunded');
+        }
+
+        // Build row array
+        $rows[] = array(
+          l($product_info->order_id, 'admin/commerce/orders/'.$product_info->order_id),
+          (float)($data['amount']/100),
+          $transaction_status,
+          $quantity,
+          $other_price,
+          $referenced_products,
+          date('d/m/Y - H:i:s', $product_info->timestamp),
+        );
+      }
+
+      $page .= theme('table', array('header' => $header, 'rows' => $rows));
+    }
+
+  return $page;
+}
+
+/**
+ * Access callback for reservations page.
+ *
+ * Only show on Offers pages.
+ */
+function bosa_reservation_page_access($nid) {
+  global $user;
+  $node = node_load($nid);
+  return $node->type == 'offer' && $user->uid > 0;
+}
+
+/**
+ * Page callback for reservations page.
+ */
+function bosa_reservation_page($nid) {
+  $html = array();
+  $node = node_load($nid);
+  $product_ids = field_get_items('node', $node, 'field_reference');
+  foreach ($product_ids as $product_id) {
+    $product_id = array_shift($product_id);
+    $head = array('Order ID', 'Link');
+    $data = array();
+    $info = _bosa_reservation_product_info($product_id);
+    foreach ($info['orders'] as $order_id) {
+      $data[] = array(
+        $order_id,
+        l(t('Edit'), 'admin/commerce/orders/' . $order_id)
+      );
+    }
+
+    $html[$product_id] = "<h2>Product: " . l($product_id, 'admin/commerce/products/' . $product_id) . "</h2>\n" . theme('table', array('header' => $head, 'rows' => $data));
+  }
+  ksort($html);
+  return implode('', $html);
+}
+
+/**
+ * Helper function for retrieving relevant reservations info.
+ *
+ * @param int $pid
+ *   Product ID
+ *
+ * @return array
+ *   Information array
+ */
+function _bosa_reservation_product_info($pid) {
+  if ($prod = commerce_product_load($pid)) {
+    $count = 0;
+    $min = field_get_items('commerce_product', $prod, 'field_mindste_antal');
+    $min = empty($min) ? 0 : array_shift(array_shift($min));
+    $stock = field_get_items('commerce_product', $prod, 'commerce_stock');
+    $stock = empty($stock) ? 0 : array_shift(array_shift($stock));
+    $query = new EntityFieldQuery();
+    $result = $query->entityCondition('entity_type', 'commerce_line_item')
+        ->propertyCondition('type', 'product')
+        ->fieldCondition('commerce_product', 'product_id', $pid, '=')
+        ->execute();
+    $line_item_ids = isset($result['commerce_line_item']) ? array_keys($result['commerce_line_item']) : array();
+    $orders = array();
+    foreach (commerce_line_item_load_multiple($line_item_ids) as $line_item) {
+      if ($line_item->order_id > 0) {
+        // Load order and check for status.
+        $order = commerce_order_load($line_item->order_id);
+        if($order->status == 'completed'){
+          $count += $line_item->quantity;
+          if(!in_array($line_item->order_id, $orders)){
+            $orders[] = $line_item->order_id;
+          }
+        }
+      }
+    }
+    return array(
+      'id' => (int) $pid,
+      'min' => (int) $min,
+      'stock' => (int) $stock,
+      'count' => (int) $count,
+      'orders' => $orders,
+    );
+  }
+  else {
+    return NULL;
+  }
+}
+
+/**
+ * bosa_reservation_cancel_reservations()
+ *
+ * Helper function for cancelling reservations for product with insufficient attendance
+ *
+ * @return
+ *  array - order and product number/ids
+ */
+function bosa_reservation_cancel_reservations($product_ids) {
+  $cancel_info = array();
+  foreach($product_ids as $product_id)
+  {
+    $info = _bosa_reservation_product_info($product_id);
+
+    if(empty($info['orders']))
+    {
+      continue;
+    }
+    if($info['count'] < $info['min'])
+    {
+      $product = commerce_product_load($product_id);
+      // Doin some logging
+      watchdog('bosa_reservation', 'cancel product: @product_id', array('@product_id' => $product_id), WATCHDOG_NOTICE);
+
+      // Disable the product, so customers cant buy it,
+      // and the refund action is not triggered again
+      $product->status = 0;
+      commerce_product_save($product);
+
+      $cancel_info[$product->product_id] = $info['orders'];
+    }
+  }
+  return $cancel_info;
+}
+
+/**
+ * bosa_reservation_refund_process()
+ *
+ * Process refunds from associative array containing order numbers
+ *  and product ids.
+ *
+ * @params
+ *  cancel_info array
+ */
+function bosa_reservation_refund_process($cancel_info){
+  $orders = array();
+  $prev_order_id = '';
+
+  // Provide product_id and orders
+  foreach($cancel_info as $product_id => $orders) {
+    // Provide order_id
+    foreach($orders as $order_id){
+
+      // We dont want to process same order twice
+      if($prev_order_id == $order_id){
+        continue;
+      }
+
+      // Load orders, we need to pass this on
+      $order = commerce_order_load($order_id);
+      $order->status = 'canceled';
+      commerce_order_save($order);
+
+      // Get amount to refund
+      $info = _bosa_reservation_refund_get_info($order, $product_id);
+
+      $refund = bosa_reservation_refund_payment($order, $info['amount']);
+
+      $info['refund_status'] = 'failure';
+
+      if($refund) {
+        $info['refund_status'] = 'success';
+      }
+
+      bosa_reservation_save_info($product_id, $order_id, $info);
+
+      // Remember order_id
+      $prev_order_id = $order_id;
+    }
+    $prev_order_id = NULL;
+  }
+}
+
+/**
+ * bosa_reservation_save_info()
+ *
+ * Save product info to db
+ *
+ * @param
+ *  product_id
+ *  order_id
+ *  info array
+ */
+function bosa_reservation_save_info($product_id, $order_id, $info) {
+  error_log(__FILE__.':'.__LINE__. print_r($info, 1)); // tth@bellcom.dk debugging
+  db_insert('bosa_reservation')
+  ->fields(array(
+    'product_id' => $product_id,
+    'order_id' => $order_id,
+    'data' => serialize($info),
+    'timestamp' => REQUEST_TIME,
+  ))
+  ->execute();
+}
+
+/**
+ * bosa_reservation_get_info()
+ *
+ * Collects product info from db
+ *
+ * @params
+ *  product_id
+ *
+ * @return
+ *  info array
+ */
+function bosa_reservation_get_info($product_id) {
+  $info = array();
+
+  $results = db_select('bosa_reservation', 'b')
+      ->fields('b')
+      ->condition('product_id', $product_id, '=')
+      ->execute()
+      ->fetchAll();
+
+  foreach($results as $result) {
+    $info[$result->order_id] = $result;
+  }
+
+  return $info;
+}
+
+/**
+ * bosa_reservation_refund_payment()
+ *
+ * Handles refund through quickpay
+ *
+ * @params
+ *  order object
+ *  amount to refund
+ *
+ * @return
+ *  bool - transaction success
+ */
+function bosa_reservation_refund_payment($order, $amount){
+  // Create transaction for refund
+  $transaction = commerce_payment_fetch_last_payment_transaction($order->order_id);
+  $payment_method = commerce_payment_method_instance_load($transaction->instance_id);
+
+  try {
+    $qp = new Quickpay($payment_method['settings']);
+    $txn = $qp->transaction($transaction->remote_id);
+
+    // QuickPay refund amount
+    $txn_amount = commerce_currency_amount_to_decimal($amount, $transaction->currency_code);
+    $txn->refund($txn_amount);
+
+    $transaction->amount = -$amount;
+    $transaction->payload[REQUEST_TIME] = $txn;
+
+    if ($txn->success()) {
+      // Doin some logging
+      watchdog('bosa_reservation', 'refund completed order: @order', array('@order' => $order->order_id), WATCHDOG_NOTICE);
+
+      $transaction->data = 'bosa_reservation_refund';
+      $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+      $success = TRUE;
+    }
+    else {
+      // Doin some logging
+      watchdog('bosa_reservation', 'refund failed order_id: @order', array('@order' => $order->order_id), WATCHDOG_NOTICE);
+
+      $transaction->status = COMMERCE_PAMENT_STATUS_FAILURE;
+      $success = FALSE;
+    }
+
+    // Save transaction
+    commerce_payment_transaction_save($transaction);
+  }
+  catch (QuickpayException $e){
+    watchdog('bosa_reservation', 'refund failed order_id: @order', array('@order' => $order->order_id), WATCHDOG_NOTICE);
+    $success = FALSE;
+  }
+
+  return $success;
+}
+
+/**
+ * _bosa_reservation_refund_get_info()
+ *
+ * Collect info about cancelled product:
+ *  amount, quantity, referenced lineitems
+ *
+ * @params
+ *  order object,
+ *  product_id
+ *
+ * @return
+ *  info array
+ */
+function _bosa_reservation_refund_get_info($order, $product_id) {
+  $info = array();
+  $administration_tax = NULL;
+  $administration_line_item = NULL;
+  $product = commerce_product_load($product_id);
+
+  // Load all lineitems in order
+  $line_items = commerce_line_item_load_multiple($order->commerce_line_items[LANGUAGE_NONE]);
+  $referenced_line_item_ids = array();
+  $line_item_ids = array();
+  $line_item_price = '';
+  $referenced_line_item_price = '';
+
+  // Iterate over all line items in order
+  foreach($line_items as $key => $line_item)
+  {
+    // Get administration tax, save for later use
+    if($line_item->line_item_label == 'Administrationsgebyr')
+    {
+      $administration_tax = $line_item->commerce_total[LANGUAGE_NONE][0]['amount'];
+
+      $administration_line_item = $line_item->line_item_id;
+      continue;
+    }
+
+    $line_item_product_id = $line_item->commerce_product[LANGUAGE_NONE][0]['product_id'];
+    $line_item_product = commerce_product_load($line_item_product_id);
+
+    // Check wether the line item has the same product id
+    // as the product we are cancelling
+    if($line_item_product_id == $product_id)
+    {
+      $line_item_quantity = $line_item->quantity;
+      $line_item_price += $line_item->commerce_total[LANGUAGE_NONE][0]['amount'];
+      $line_item_ids[] = $line_item->line_item_id;
+
+      $info['quantity'] += (int)$line_item->quantity;
+
+      // If the product has the 2nd price, we save info about it
+      if($line_item->commerce_unit_price[LANGUAGE_NONE][0]['amount'] == $line_item_product->field_2nd_price[LANGUAGE_NONE][0]['amount']) {
+        $info['2nd_price'] += (int)$line_item->quantity;
+
+      }
+
+    }
+
+    // Check if the product is referenced to the reservated product.
+    if(!empty($line_item->field_line_item_ref))
+    {
+      if($line_item->field_line_item_ref[LANGUAGE_NONE][0]['value'] == $product_id)
+      {
+        // Save these so we can remove them also, if needed
+        $referenced_line_item_ids[] = $line_item->line_item_id;
+        $referenced_line_item_price += $line_item->commerce_total[LANGUAGE_NONE][0]['amount'];
+        $referenced_line_item_product = commerce_product_load($line_item->commerce_product[LANGUAGE_NONE][0]['product_id']);
+        $info['ref'][] = array(
+          'id' => $referenced_line_item_product->product_id,
+          'quantity' => (int)$line_item->quantity,
+        );
+      }
+    }
+  }
+
+  $calculated_total = $referenced_line_item_price + $line_item_price + $administration_tax;
+
+  // Amount to refund
+  $amount = $referenced_line_item_price + $line_item_price;
+
+  // If the order total is the same as order total, refund all
+  // This is only releveant because of the administration tax.
+  if($calculated_total == $order->commerce_order_total[LANGUAGE_NONE][0]['amount']) {
+    $amount = $order->commerce_order_total[LANGUAGE_NONE][0]['amount'];
+    $info['ref'][] = 'administration_tax';
+    $referenced_line_item_ids[] = $administration_line_item;
+  }
+
+  $info['amount'] = $amount;
+
+  $info['line_item_ids'] = $line_item_ids;
+  $info['referenced_line_item_ids'] = $referenced_line_item_ids;
+
+  return $info;
+}

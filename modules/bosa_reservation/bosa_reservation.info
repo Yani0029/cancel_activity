@@ -1,0 +1,3 @@
+name = BOSA Reservations system
+description = Handles reservations and cancellations of trips.
+core = 7.x

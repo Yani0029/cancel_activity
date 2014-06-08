@@ -1,0 +1,4 @@
+name = Cancel activity
+description = Handles activity cancellation
+core = 7.x
+files[] = cancel_activity_refund.inc

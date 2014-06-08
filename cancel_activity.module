@@ -1,0 +1,490 @@
+<?php
+/**
+ * cancel_activity module
+ *
+ * @author Thomas Thune Hansen <tth@bellcom.dk>
+ * @copyright 2014 bellcom open source aps
+ **/
+
+module_load_include('inc', 'cancel_activity', 'cancel_activity.refund');
+/**
+ * Implements hook_cron()
+ */
+function cancel_activity_cron(){
+  $last_run = variable_get('cancel_activity_cron');
+  if (date('Y-m-d') != $last_run) {
+    $all_product_ids = _cancel_activity_query_products();
+    $cancel_products = _cancel_activity_check_cancellation($all_product_ids);
+
+    _cancel_activity_send_reminder($cancel_products);
+
+    // Only run once a day
+    variable_set('cancel_activity_cron', date('Y-m-d'));
+  }
+}
+
+/**
+ * query for all products with dates in set criteria
+ */
+function _cancel_activity_query_products(){
+  $days = variable_get('cancel_activity_days_before', 2);
+  $date = date('Y-m-d', strtotime('+' . $days . ' day'));
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'commerce_product')
+    ->propertyCondition('status', 1) // Only active products
+    ->fieldCondition('field_offer_dato', 'value', $date. '%', 'like');
+
+  $result = $query->execute();
+
+  if(isset($result['commerce_product'])){
+    $product_ids = array_keys(reset($result));
+
+    return $product_ids;
+  }
+}
+
+/**
+ *
+ */
+function _cancel_activity_check_cancellation($product_ids){
+  $cancel_product_ids = array();
+
+  foreach(commerce_product_load_multiple($product_ids) as $product){
+    $product_id = $product->product_id;
+    $quantity = 0;
+
+    $line_item_ids = _cancel_activity_get_line_item_ids($product_id);
+
+    // Check if the order is completed, if no unset.
+    _cancel_activity_check_order($line_item_ids);
+
+    $quantity = _cancel_activity_check_quantity($line_item_ids);
+
+    if( $minimum_field = field_get_items('commerce_product',$product, 'field_mindste_antal') ){
+      if($minimum_field[0]['value'] > $quantity){
+        $cancel_products[] = $product;
+      }
+    }
+  }
+
+  return $cancel_products;
+}
+
+/**
+ * check if the order is completed, if not, unset the line_item_id
+ */
+function _cancel_activity_check_order(&$line_item_ids){
+  foreach($line_item_ids as $key => $line_item_id){
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'commerce_order')
+      ->fieldCondition('commerce_line_items', 'line_item_id', $line_item_id)
+      ->propertyCondition('status', 'completed');
+
+    $result = $query->execute();
+    if(!isset($result['commerce_order'])){
+      unset($line_item_ids[$key]);
+    }
+  }
+}
+
+/**
+ * Get quantity for product lineitems
+ */
+function _cancel_activity_check_quantity($line_item_ids){
+  $quantity = 0;
+
+  foreach(commerce_line_item_load_multiple($line_item_ids) as $line_item){
+    $quantity += $line_item->quantity;
+  }
+
+  return $quantity;
+}
+
+/**
+ *
+ */
+function _cancel_activity_get_line_item_ids($product_id){
+  $line_item_ids = array();
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'commerce_line_item')
+    ->entityCondition('bundle', 'product', '=')
+    ->fieldCondition('commerce_product', 'product_id', $product_id, '=');
+
+  $result = $query->execute();
+  if(isset($result['commerce_line_item'])){
+    $line_item_ids = array_keys(reset($result));
+  }
+  return $line_item_ids;
+}
+
+/**
+ * Send reminder to activity owner that the product is about to be held.
+ */
+function _cancel_activity_send_reminder($cancel_products){
+  global $base_url;
+
+  foreach($cancel_products as $product){
+    $account = user_load($product->uid);
+    // Only allow certain users to cancel the activity
+    if(user_access('cancel own activity', $account)){
+      $account->mail;
+
+      $params['subject'] = 'Produkt har ikke opnået minimum: ' . $product->title;
+      $body = "Hej !name,
+
+        Dit produkt !product_title, har ikke opnået minimum deltagerantal.
+        Du kan se mere her !link
+
+        Med venlig hilsen
+        Oplevfyn.dk";
+
+      $params['body'] = t($body, array('!product_title' => $product->title,
+                                       '!name' => $account->name,
+                                       '!link' => $base_url . '/admin/commerce/products/' .$product->product_id . '/cancel'
+                                     )
+                                   );
+
+      drupal_mail('cancel_activity', 'reminder', $account->mail, 'da', $params);
+    }
+  }
+}
+
+/**
+ * Implements hook_mail()
+ */
+function cancel_activity_mail($key, &$message, $params){
+  switch ($key)
+  {
+    default:
+      $message['subject'] = $params['subject'];
+      $message['body'] = $params['body'];
+  }
+}
+
+/**
+ * Implements hook_menu()
+ */
+function cancel_activity_menu(){
+  $items = array();
+
+  $items['admin/commerce/products/%/cancel'] = array(
+    'title' => 'Cancel product',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('cancel_activity_page'),
+    'access arguments' => array('cancel own products'),
+    'type' => MENU_LOCAL_TASK,
+  );
+  $items['admin/commerce/cancel_activity'] = array(
+    'title' => 'Cancel activity settings',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('cancel_activity_admin_page'),
+    'access arguments' => array('administer cancel_activity'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  return $items;
+}
+
+/**
+ * let the user cancel the product
+ */
+function cancel_activity_page(){
+  $product_id = arg(3);
+  $product = commerce_product_load($product_id);
+  $minimum = 0;
+  if ($product->type != "bosa_produkt") {
+
+    if( $minimum_field = field_get_items('commerce_product',$product, 'field_mindste_antal') ){
+      $minimum = $minimum_field[0]['value'];
+    }
+
+    $count = _cancel_activity_check_quantity(_cancel_activity_get_line_item_ids($product_id));
+
+    if($count == 0){
+      return array(array('#markup' => 'Dette produkt kan ikke aflyses da det ikke er blevet solgt!'));
+    }
+
+    if($product->status == 0){
+      return array(array('#markup' => 'Dette produkt kan ikke aflyses da det ikke aktivt!'));
+    }
+
+    $s = "Dit produkt har !count deltagere. Du har angivet minimum til at være !minimum.
+      Du kan se deltagerliste her: !link
+
+      Denne handling kan ikke fortrydes!";
+
+    $message = t(nl2br($s), array(
+      '!minimum' => $minimum,
+      '!count' => $count,
+      '!link' => l('deltagerliste', 'bosa/voucher/product/'.$product_id),
+    ));
+
+    $form['product_id'] = array('#type' => 'hidden', '#value' => $product_id);
+    $form['#submit'][] = 'cancel_activity_page_submit';
+
+    return confirm_form($form, 'Aflys aktivitet', '<front>', $message, t('Ja, fortsæt'), t('Cancel'));
+  }
+  else {
+    // Here comes the new BOSA products
+    module_load_include('inc','bosa_add_to_cart','bosa_add_to_cart.seats');
+    $css = ".product-checkbox {width : 20px; float:left;}
+            .message {border-bottom: 1px solid #e3e3e3; float: left}
+            .date {float : left; padding-right: 20px;}";
+    drupal_add_css($css,$option['type'] = 'inline');
+    $bosa_product_field = field_get_items('commerce_product',$product, 'field_product_date_and_stock');
+
+    foreach($bosa_product_field as $key => $item) {
+      $stock = bosa_reserved_seats_available($product_id,$key);
+      $attendee = 0;
+      if($cancel_info = bosa_reserved_bosa_product_order_info($product_id,$key)) {
+        foreach($cancel_info as $cancel) {
+          $attendee += $cancel['quantity'];
+        }
+        $disable = FALSE;
+        $s = "Dit produkt har !count deltagere. Du har angivet minimum til at være !minimum.
+              Du kan se deltagerliste her: !link
+              Denne handling kan ikke fortrydes!";
+
+        $message = t(nl2br($s), array(
+         '!minimum' => $item['product_min_attendee'],
+         '!count' => $attendee,
+         '!link' => l('deltagerliste', 'bosa/voucher/product/'.$product_id.'/'.$key),
+        ));
+      }
+      else {
+        $disable = TRUE;
+        $message = "Dette produkt kan ikke aflyses da det ikke er blevet solgt!";
+      }
+      if(!$item['product_status']) {
+        $disable = TRUE;
+        $message = "Dette produkt kan ikke aflyses da det ikke aktivt!";
+      }
+      else {
+        $disable = FALSE;
+      }
+      $form[$key] = array(
+        '#prefix' => '<div class= "dato">',
+        '#type' => 'fieldset',
+        '#title' => $product->title,
+        '#suffix' => "</div>",
+      );
+      $form[$key][$key][$product_id . "_". $key . 'checkbox '] = array(
+        '#prefix' => '<div class= "product-checkbox">',
+        '#type' => 'checkbox',
+        '#suffix' => "</div>",
+        "#disabled" => $disable,
+      );
+      if ($item['product_wdate']) {
+        $date = "";
+      }
+      else {
+        $date = date('d/m/Y - H:i',strtotime($item['product_date']));
+      }
+      $form[$key][$product_id . "_". $key . 'dato '] = array(
+        '#prefix' => '<div class= "date">',
+        '#type' => 'item',
+        '#markup' => $date,
+        '#suffix' => "</div>",
+      );
+      $form[$key][$product_id . "_". $key . 'message '] = array(
+        '#prefix' => '<div class= "message">',
+        '#type' => 'item',
+        '#markup' => $message,
+        '#suffix' => "</div>",
+      );
+    }
+    $form['comfirmation'] = array(
+      '#type' => 'checkbox',
+      '#required' => TRUE,
+      '#title' => t('Jeg bekræfter, at jeg fortsætter med at aflyse aktiviter.')
+    );
+    $form['cancel_submit'] = array(
+      '#value' => t('Ja, fortsæt'),
+      '#submit' => 'cancel_activity_page_submit',
+      '#type' => 'submit',
+    );
+
+    return $form;
+  }
+}
+
+/**
+ * submit handler for cancellation
+ */
+function cancel_activity_page_submit(&$form, &$form_state){
+  $product_id = $form_state['values']['product_id'];
+  $product = commerce_product_load($product_id);
+
+  // We rely on bosa_reservation for the cancellation/refunding
+  $cancel_info = bosa_reservation_cancel_reservations(array($product_id));
+  bosa_reservation_refund_process($cancel_info);
+
+  _cancel_activity_notify_buyer($cancel_info);
+
+  $params['subject'] = "Aflysning af produkt: " . $product->title;
+
+  global $base_url;
+
+  $msg = "Hej,
+
+    Aktøren for !link, har aflyst aktiviteten.
+    ";
+
+  $params['body'] = t($msg, array('!link' => $base_url . '/admin/commerce/products/' . $product_id));
+
+  drupal_set_message('Dit produkt er blevet aflyst');
+
+  $mails = explode(',', variable_get('cancel_activity_admin_mails'));
+  foreach($mails as $mail){
+    drupal_mail('cancel_activity', 'notify', $mail, 'da', $params);
+  }
+
+  drupal_goto('<front>');
+}
+
+/**
+ * Send mail to buyer that the activity is cancelled
+ */
+function _cancel_activity_notify_buyer($cancel_info){
+  foreach($cancel_info as $product_id => $orders) {
+    $product = commerce_product_load($product_id);
+    foreach($orders as $order_id){
+      $order = commerce_order_load($order_id);
+
+      $tokens = _cancel_activity_get_tokens($order, $product);
+
+      $params['subject'] = variable_get('cancel_activity_mail_subject', '');
+      $params['subject'] = t(variable_get('cancel_activity_mail_body', ''), $tokens);
+      drupal_mail('cancel_activity', 'notify_buyer', $order->mail, 'da', $params);
+    }
+  }
+}
+
+/**
+ * get replacement tokens for user mail
+ */
+function _cancel_activity_get_tokens($order, $product){
+  //Get product date
+  if ($field = field_get_items('commerce_product', $product, 'field_offer_dato')) {
+    // This is possible if its one of the old product types
+    $product_date = date('d/m-Y, H:i', strtotime($field[0]['value']));
+  }
+  else {
+    // We need the lineitem, as the date is stored here on new products
+    $query = new EntityFieldQuery();
+
+    $query->entityCondition('entity_type', 'commerce_line_item')
+      ->fieldCondition('commerce_product', 'product_id', $product->product_id);
+
+    $result = $query->execute();
+    if (!empty($result['commerce_line_item'])){
+      $line_items = array_keys(reset($result));
+    }
+
+    if ($field = field_get_items('commerce_order', $order, 'commerce_line_items')) {
+      foreach($field as $delta => $content){
+        $order_line_items[] = $content['line_item_id'];
+      }
+    }
+
+    $line_item_id = reset(array_intersect($order_line_items, $line_items));
+
+    $line_item = commerce_line_item_load($line_item_id);
+
+    if ($field = field_get_items('commerce_line_item', $line_item, 'field_bosa_selected_date')){
+      $date = $field[0]['value'];
+    }
+  }
+  // prettify date
+  $product_date = date('d/m-Y, H:i', strtotime($date));
+
+  // Get seller name from display node
+  $query = new EntityFieldQuery();
+
+  $query->entityCondition('entity_type', 'node')
+    ->entityCondition('bundle', 'offer')
+    ->fieldCondition('field_reference', 'product_id', $product->product_id);
+
+  $result = $query->execute();
+
+  if (!empty($result['node'])) {
+    if ($node = node_load(key(reset($result)))) {
+      if ($field = field_get_items('node', $node, 'field_seller_name')) {
+        $seller_name = $field[0]['value'];
+      }
+    }
+  }
+
+  // Get customer name from order
+  if ($field = field_get_items('commerce_order', $order, 'commerce_customer_billing')) {
+    if ($profile = commerce_customer_profile_load($field[0]['profile_id'])) {
+      if ($field = field_get_items('commerce_customer_profile', $profile, 'commerce_customer_address')) {
+        $customer_name = $field[0]['name_line'];
+      }
+    }
+  }
+
+  return array(
+          '!product_title' => $product->title,
+          '!product_date' => $product_date,
+          '!customer_name' => $customer_name,
+          '!seller_name' => $seller_name,
+        );
+}
+
+/**
+ * Implements hook_permission()
+ */
+function cancel_activity_permission(){
+  return array(
+    'cancel own activity' => array(
+
+      'title' => t('Allow user to cancel own product activities'),
+      'description' => t('Allow user to cancel product and refund payment'),
+    )
+  );
+
+}
+
+/**
+ * Set up activity cancel
+ */
+function cancel_activity_admin_page(){
+  $form[] = array(
+    '#markup' => 'Kun brugere med tilladelsen ' . l('"Allow user to cancel own product activities"', 'admin/people/permissions') . ' kan anullere deres aktiviteter.    ',
+  );
+
+  $form['cancel_activity_admin_mails'] = array(
+    '#title' => 'Admin mail adresser',
+    '#description' => 'En kommasepereret liste af emailadresser, der skal modtage beskeder om aflyste produkter',
+    '#type' => 'textfield',
+    '#default_value' => variable_get('cancel_activity_admin_mails', ''),
+  );
+
+  $form['cancel_activity_days_before'] = array(
+    '#title' => 'Hvor mange dage før aktiviteten, skal aktøren adviseres',
+    '#type' => 'select',
+    '#options' => array(1 => 1,2 => 2,3 => 3,4 => 4),
+    '#default_value' => variable_get('cancel_activity_days_before', 2),
+  );
+
+  $form['cancel_activity_mail_subject'] = array(
+    '#title' => 'Annullerings mail emne',
+    '#type' => 'textfield',
+    '#default_value' => variable_get('cancel_activity_mail_subject'),
+  );
+
+  $form['cancel_activity_mail_body'] = array(
+    '#title' => 'Annullerings mail besked',
+    '#type' => 'textarea',
+    '#description' => '!product_title - produktets titel <br>' .
+          '!product_date - produktets dato <br>' .
+          '!seller_name - sælgers navn (fra visningen)<br>' .
+          '!customer_name - købers navn',
+    '#default_value' => variable_get('cancel_activity_mail_body'),
+  );
+
+
+  return system_settings_form($form);
+}
