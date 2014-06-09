@@ -193,6 +193,8 @@ function cancel_activity_page(){
   $product_id = arg(3);
   $product = commerce_product_load($product_id);
   $minimum = 0;
+
+  // YANI: check product type, cause bosa_produkt contains multiple fields.
   if ($product->type != "bosa_produkt") {
 
     if( $minimum_field = field_get_items('commerce_product',$product, 'field_mindste_antal') ){
@@ -225,19 +227,44 @@ function cancel_activity_page(){
 
     return confirm_form($form, 'Aflys aktivitet', '<front>', $message, t('Ja, fortsæt'), t('Cancel'));
   }
+  // YANI - bosa_produkt type.
   else {
-    // Here comes the new BOSA products
+    // YANI : Here comes the new BOSA products
     module_load_include('inc','bosa_add_to_cart','bosa_add_to_cart.seats');
+
     $css = ".product-checkbox {width : 20px; float:left;}
-            .message {border-bottom: 1px solid #e3e3e3; float: left}
-            .date {float : left; padding-right: 20px;}";
+            .message { float: left}
+            .date {float : left; padding-right: 20px;}
+            #cancel-activity-page .form-type-checkbox {clear:left;}
+            ";
     drupal_add_css($css,$option['type'] = 'inline');
+
     $bosa_product_field = field_get_items('commerce_product',$product, 'field_product_date_and_stock');
+
+    $form['comfirmation'] = array(
+      '#prefix' => '<div style = "font-size: 16px;">',
+      '#type' => 'checkbox',
+      '#required' => TRUE,
+      '#title' => '<b>'.t('Jeg bekræfter, at jeg fortsætter med at aflyse aktiviter.').'</b>',
+      '#suffix' => '</div>',
+    );
+    $form['product_delta'] = array(
+        '#type' => 'fieldset',
+        '#tree' => TRUE,
+    );
 
     foreach($bosa_product_field as $key => $item) {
       $stock = bosa_reserved_seats_available($product_id,$key);
       $attendee = 0;
-      if($cancel_info = bosa_reserved_bosa_product_order_info($product_id,$key)) {
+      $cancel_info = bosa_reserved_bosa_product_order_info($product_id,$key);
+      if(!$item['product_status']) {
+        $disable = TRUE;
+        $message = "Dette produkt kan ikke aflyses da det ikke aktivt!";
+      }
+      else {
+        $disable = FALSE;
+      }
+      if($cancel_info) {
         foreach($cancel_info as $cancel) {
           $attendee += $cancel['quantity'];
         }
@@ -256,20 +283,14 @@ function cancel_activity_page(){
         $disable = TRUE;
         $message = "Dette produkt kan ikke aflyses da det ikke er blevet solgt!";
       }
-      if(!$item['product_status']) {
-        $disable = TRUE;
-        $message = "Dette produkt kan ikke aflyses da det ikke aktivt!";
-      }
-      else {
-        $disable = FALSE;
-      }
-      $form[$key] = array(
+
+      $form['product_delta'][$key] = array(
         '#prefix' => '<div class= "dato">',
         '#type' => 'fieldset',
         '#title' => $product->title,
         '#suffix' => "</div>",
       );
-      $form[$key][$key][$product_id . "_". $key . 'checkbox '] = array(
+      $form['product_delta'][$key]['selected'] = array(
         '#prefix' => '<div class= "product-checkbox">',
         '#type' => 'checkbox',
         '#suffix' => "</div>",
@@ -281,30 +302,27 @@ function cancel_activity_page(){
       else {
         $date = date('d/m/Y - H:i',strtotime($item['product_date']));
       }
-      $form[$key][$product_id . "_". $key . 'dato '] = array(
+      $form['product_delta'][$key][$product_id . '_dato'] = array(
         '#prefix' => '<div class= "date">',
         '#type' => 'item',
         '#markup' => $date,
         '#suffix' => "</div>",
       );
-      $form[$key][$product_id . "_". $key . 'message '] = array(
+      $form['product_delta'][$key][$product_id . '_message'] = array(
         '#prefix' => '<div class= "message">',
         '#type' => 'item',
         '#markup' => $message,
         '#suffix' => "</div>",
       );
+      if($cancel_info) {
+      $form['product_delta'][$key]['cancel_submit'] = array(
+        '#value' => t('Ja, fortsæt'),
+        '#submit' => array('cancel_activity_page_submit'),
+        '#type' => 'submit',
+      );
+      }
     }
-    $form['comfirmation'] = array(
-      '#type' => 'checkbox',
-      '#required' => TRUE,
-      '#title' => t('Jeg bekræfter, at jeg fortsætter med at aflyse aktiviter.')
-    );
-    $form['cancel_submit'] = array(
-      '#value' => t('Ja, fortsæt'),
-      '#submit' => 'cancel_activity_page_submit',
-      '#type' => 'submit',
-    );
-
+    $form['product_id'] = array('#type' => 'hidden', '#value' => $product_id);
     return $form;
   }
 }
@@ -314,13 +332,48 @@ function cancel_activity_page(){
  */
 function cancel_activity_page_submit(&$form, &$form_state){
   $product_id = $form_state['values']['product_id'];
+
   $product = commerce_product_load($product_id);
 
-  // We rely on bosa_reservation for the cancellation/refunding
-  $cancel_info = bosa_reservation_cancel_reservations(array($product_id));
-  bosa_reservation_refund_process($cancel_info);
+  // YANI: check if commerce product type is "bosa_produkt" which contains multiple (date, stock, min, status...)
+  if($product->type == 'bosa_produkt'){
 
-  _cancel_activity_notify_buyer($cancel_info);
+    foreach($form_state['values']['product_delta'] as $delta => $selected) {
+      if($selected['selected']) {
+
+        // YANI: Se function in bosa_add_to_cart.seats.inc, get completed order info.
+        $cancel_orders = bosa_reserved_bosa_product_order_info($product_id,$delta);
+
+        // YANI: Deactive products.
+        $product_disabled = bosa_reservation_deactive_products($product_id,$delta,$cancel_orders);
+
+        // YANI: If delta-product NOT deactived, it could be delta-product-date, order-status, or minimum attendees problem.
+        if ($product_disabled) {
+          $orders = array();
+          foreach ($cancel_orders as $key => $item) {
+            $orders[] = $item['order_id'];
+          }
+          $info[$product_id] = $orders;
+
+          bosa_reservation_refund_process($info);
+
+          _cancel_activity_notify_buyer($info);
+
+        }
+        else {
+          drupal_set_message(t('Der sker en fejl, check produkts deltagere, sidste frist, eller minimum deltager nr.'),'error');
+          return;
+        }
+      }
+    }
+  }
+  else {
+    // We rely on bosa_reservation for the cancellation/refunding
+    $cancel_info = bosa_reservation_cancel_reservations(array($product_id));
+    bosa_reservation_refund_process($cancel_info);
+
+    _cancel_activity_notify_buyer($cancel_info);
+  }
 
   $params['subject'] = "Aflysning af produkt: " . $product->title;
 

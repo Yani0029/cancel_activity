@@ -39,6 +39,10 @@ function bosa_reservation_refund_page(){
 
   $product_ids = array_keys(array_shift($result));
 
+  // YANI: ADD BOSA product type 'bosa_produkt'
+  $bosa_pids = bosa_reservation_get_bosa_products_refund_ids();
+  $product_ids = array_merge($product_ids, $bosa_pids);
+
   foreach ($product_ids as $product_id) {
 
       $info = bosa_reservation_get_info($product_id);
@@ -89,7 +93,7 @@ function bosa_reservation_refund_page(){
         $quantity = $data['quantity'];
 
         // Set info about refund status
-    $transaction_status = t('Not refunded');
+        $transaction_status = t('Not refunded');
         if($data['refund_status'] == 'success'){
           $transaction_status = t('Amount refunded');
         }
@@ -277,6 +281,45 @@ function bosa_reservation_refund_process($cancel_info){
     }
     $prev_order_id = NULL;
   }
+}
+
+/**
+ * bosa_reservation_deactive_products()
+ *
+ * Deactive Bosa product - delta dato
+ * @param product_id, delta
+ * @author Yani Xu <yx@bellcom.dk>
+ *
+ */
+function bosa_reservation_deactive_products($product_id,$delta,$cancel_orders){
+  $product = commerce_product_load($product_id);
+  if(isset($product->field_product_date_and_stock)) {
+    $date_stock = field_get_items('commerce_product', $product, 'field_product_date_and_stock');
+    $last_min = field_get_items('commerce_product', $product, 'field_product_last_mins');
+    $time_tmp = strtotime($date_stock[$delta]['product_date']) - $last_min[0]['value'] * 60 * 60;
+    // If the time is later than the last date for product selling.
+    if (time() > $time_tmp) {
+      // When seats is unlimited, return false.
+      if ($date_stock[$delta]['product_min_attendee'] == 0) {
+
+        return FALSE;
+      }
+      $attendee = 0;
+      if($cancel_orders) {
+        foreach($cancel_orders as $cancel) {
+          $attendee += $cancel['quantity'];
+        }
+      }
+      if ($attendee < $date_stock[$delta]['product_min_attendee']) {
+        // Disable the product, so customers cant buy it again.
+        $product->field_product_date_and_stock['und'][$delta]['product_status'] = 0;
+        commerce_product_save($product);
+        watchdog('bosa_reservation', 'Deactive product (Next cancellation): @product_id - delta : @delta', array('@product_id' => $product_id,'@delta' => $delta), WATCHDOG_NOTICE);
+        return TRUE;
+      }
+    }
+  }
+  return FALSE;
 }
 
 /**
@@ -478,4 +521,24 @@ function _bosa_reservation_refund_get_info($order, $product_id) {
   $info['referenced_line_item_ids'] = $referenced_line_item_ids;
 
   return $info;
+}
+
+/**
+ * bosa_reservation_get_bosa_products_refund_ids
+ *
+ * Get bosa_produkt ids from bosa_reservation table
+ * return $ids
+ * @author Yani Xu <yx@bellcom.dk>
+ *
+ */
+function bosa_reservation_get_bosa_products_refund_ids() {
+  $sql = "SELECT DISTINCT b.`product_id` FROM `bosa_reservation` b, `commerce_product` c
+          WHERE c.`product_id` = b.`product_id` AND c.`type` = 'bosa_produkt'";
+  $query = db_query($sql);
+  $result = $query->fetchAll();
+  $ids = array();
+  foreach($result as $dbrow){
+    $ids[] = $dbrow->product_id;
+  }
+  return $ids;
 }
