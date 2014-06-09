@@ -407,8 +407,8 @@ function _cancel_activity_notify_buyer($cancel_info){
 
       $tokens = _cancel_activity_get_tokens($order, $product);
 
-      $params['subject'] = variable_get('cancel_activity_mail_subject', '');
-      $params['subject'] = t(variable_get('cancel_activity_mail_body', ''), $tokens);
+      $params['subject'] = t(variable_get('cancel_activity_mail_subject', ''), $tokens);
+      $params['body'] = t(variable_get('cancel_activity_mail_body', ''), $tokens);
       drupal_mail('cancel_activity', 'notify_buyer', $order->mail, 'da', $params);
     }
   }
