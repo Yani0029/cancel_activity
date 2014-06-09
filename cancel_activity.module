@@ -247,7 +247,7 @@ function cancel_activity_page(){
     if( $minimum_field = field_get_items('commerce_product',$product, 'field_mindste_antal') ){
       $minimum = $minimum_field[0]['value'];
     }
-   _cancel_activity_query_products();
+
     $count = _cancel_activity_check_quantity(_cancel_activity_get_line_item_ids($product_id));
 
     if($count == 0){
