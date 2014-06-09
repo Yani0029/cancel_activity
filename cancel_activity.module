@@ -14,6 +14,10 @@ function cancel_activity_cron(){
   $last_run = variable_get('cancel_activity_cron');
   if (date('Y-m-d') != $last_run) {
     $all_product_ids = _cancel_activity_query_products();
+
+    $bosa_pids = _cancel_activity_query_products_bosa();
+
+    $all_product_ids = array_merge($all_product_ids, $bosa_pids);
     $cancel_products = _cancel_activity_check_cancellation($all_product_ids);
 
     _cancel_activity_send_reminder($cancel_products);
@@ -29,7 +33,7 @@ function cancel_activity_cron(){
 function _cancel_activity_query_products(){
   $days = variable_get('cancel_activity_days_before', 2);
   $date = date('Y-m-d', strtotime('+' . $days . ' day'));
-
+  $product_ids = array();
   $query = new EntityFieldQuery();
   $query->entityCondition('entity_type', 'commerce_product')
     ->propertyCondition('status', 1) // Only active products
@@ -39,11 +43,37 @@ function _cancel_activity_query_products(){
 
   if(isset($result['commerce_product'])){
     $product_ids = array_keys(reset($result));
-
-    return $product_ids;
   }
+
+  return $product_ids;
 }
 
+/**
+ * _cancel_activity_query_products_bosa()
+ * @author Yani Xu <yx@bellcom.dk>
+ * @return product_ids 
+ */
+function _cancel_activity_query_products_bosa($product_id = NULL){
+  $days = variable_get('cancel_activity_days_before', 2);
+  $date = date('Y-m-d', strtotime('+' . $days . ' day'));
+  $product_ids = array();
+
+  $sql = "SELECT f.`entity_id` FROM `field_data_field_product_date_and_stock` f
+                     WHERE f.`field_product_date_and_stock_product_date` like '%$date%'
+                     AND `field_product_date_and_stock_product_status` = 1";
+  if($product_id) {
+    $sql .= " AND f.`entity_id` = $product_id";
+  }
+
+  $query = db_query($sql);
+  $result = $query->fetchAllAssoc('entity_id');
+
+  if ($result) {
+    $product_ids = array_keys($result);
+  }
+  return $product_ids;
+
+}
 /**
  *
  */
@@ -52,18 +82,35 @@ function _cancel_activity_check_cancellation($product_ids){
 
   foreach(commerce_product_load_multiple($product_ids) as $product){
     $product_id = $product->product_id;
-    $quantity = 0;
+    // YANI : add check product type - bosa_produkt.
+    if($product->type != 'bosa_produkt') {
+      $quantity = 0;
 
-    $line_item_ids = _cancel_activity_get_line_item_ids($product_id);
+      $line_item_ids = _cancel_activity_get_line_item_ids($product_id);
 
-    // Check if the order is completed, if no unset.
-    _cancel_activity_check_order($line_item_ids);
+      // Check if the order is completed, if no unset.
+      _cancel_activity_check_order($line_item_ids);
 
-    $quantity = _cancel_activity_check_quantity($line_item_ids);
+      $quantity = _cancel_activity_check_quantity($line_item_ids);
 
-    if( $minimum_field = field_get_items('commerce_product',$product, 'field_mindste_antal') ){
-      if($minimum_field[0]['value'] > $quantity){
-        $cancel_products[] = $product;
+      if( $minimum_field = field_get_items('commerce_product',$product, 'field_mindste_antal') ){
+        if($minimum_field[0]['value'] > $quantity){
+          $cancel_products[] = $product;
+        }
+      }
+    }
+    else {
+      $bosa_product_field = field_get_items('commerce_product',$product, 'field_product_date_and_stock');
+      foreach ($bosa_product_field as $delta => $item) {
+        // Check if there is no minimum.
+        if ($item['product_min_attendee'] == 0) {
+          continue;
+        }
+        $info = bosa_reserved_bosa_product_order_info($product_id,$delta);
+        $attendees = bosa_reserved_get_quantity_by_orders($info);
+        if ($item['product_min_attendee'] > $attendees) {
+          $cancel_product_ids[] = $product;
+        }
       }
     }
   }
@@ -200,7 +247,7 @@ function cancel_activity_page(){
     if( $minimum_field = field_get_items('commerce_product',$product, 'field_mindste_antal') ){
       $minimum = $minimum_field[0]['value'];
     }
-
+   _cancel_activity_query_products();
     $count = _cancel_activity_check_quantity(_cancel_activity_get_line_item_ids($product_id));
 
     if($count == 0){
@@ -265,9 +312,7 @@ function cancel_activity_page(){
         $disable = FALSE;
       }
       if($cancel_info) {
-        foreach($cancel_info as $cancel) {
-          $attendee += $cancel['quantity'];
-        }
+        $attendee = bosa_reserved_get_quantity_by_orders($cancel_info);
         $disable = FALSE;
         $s = "Dit produkt har !count deltagere. Du har angivet minimum til at være !minimum.
               Du kan se deltagerliste her: !link

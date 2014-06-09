@@ -304,12 +304,7 @@ function bosa_reservation_deactive_products($product_id,$delta,$cancel_orders){
 
         return FALSE;
       }
-      $attendee = 0;
-      if($cancel_orders) {
-        foreach($cancel_orders as $cancel) {
-          $attendee += $cancel['quantity'];
-        }
-      }
+      $attendee = bosa_reserved_get_quantity_by_orders($cancel_orders);
       if ($attendee < $date_stock[$delta]['product_min_attendee']) {
         // Disable the product, so customers cant buy it again.
         $product->field_product_date_and_stock['und'][$delta]['product_status'] = 0;
