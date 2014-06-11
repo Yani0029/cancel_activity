@@ -218,8 +218,8 @@ function cancel_activity_menu(){
   $items['admin/commerce/products/%/cancel'] = array(
     'title' => 'Cancel product',
     'page callback' => 'drupal_get_form',
-    'page arguments' => array('cancel_activity_page'),
-    'access arguments' => array('cancel own products'),
+    'page arguments' => array('cancel_activity_page','administer cancel_activity'),
+    'access arguments' => array('cancel own activity'),
     'type' => MENU_LOCAL_TASK,
   );
   $items['admin/commerce/cancel_activity'] = array(
@@ -237,8 +237,16 @@ function cancel_activity_menu(){
  * let the user cancel the product
  */
 function cancel_activity_page(){
+  // Yani: check user is admin or has 
+  global $user;
+
   $product_id = arg(3);
+
   $product = commerce_product_load($product_id);
+  if ($user->uid != $product->uid && !user_access('administer cancel_activity')) {
+    drupal_set_message('Ingen adgand','warning');
+    return;
+  }
   $minimum = 0;
 
   // YANI: check product type, cause bosa_produkt contains multiple fields.
@@ -540,7 +548,11 @@ function cancel_activity_permission(){
 
       'title' => t('Allow user to cancel own product activities'),
       'description' => t('Allow user to cancel product and refund payment'),
-    )
+    ),
+    'administer cancel_activity' => array(
+      'title' => t('Administer cancel activities'),
+      'description' => t('Allow user to cancel ALL products and refund payment'),
+    ),
   );
 
 }
